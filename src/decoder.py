@@ -26,9 +26,9 @@ class AttentionHead(nn.Module):
         super(AttentionHead, self).__init__()
 
         # TODO: Initialize the linear layers required for the query, key, and value projections.
-        self.wq = None
-        self.wk = None
-        self.wv = None
+        self.wq = nn.Linear(d_model, d_q)
+        self.wk = nn.Linear(d_model, d_k)
+        self.wv = nn.Linear(d_model, d_v)
 
     def scaled_dot_product_attention(self, q, k, v, mask=None):
         """Calculate the attention weights with optional causal mask.
@@ -44,7 +44,19 @@ class AttentionHead(nn.Module):
             Tensor: Attention weights.
         """
         # TODO: Implement the scaled dot-product attention mechanism, now with masking.
-        output, weights = None, None
+        d_k = k.size(-1)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
+        
+        # Apply mask if provided
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, float('-inf'))
+        
+        # Apply softmax to get attention weights
+        weights = F.softmax(scores, dim=-1)
+        
+        # Calculate output
+        output = torch.matmul(weights, v)
+        
         return output, weights
 
     def forward(self, x, mask=None):
@@ -58,7 +70,13 @@ class AttentionHead(nn.Module):
             Tensor: Output tensor of shape (batch_size, seq_len, d_v).
         """
         #TODO: Implement the forward pass for the attention head, now with masking.
-        output = None
+        q = self.wq(x)
+        k = self.wk(x)
+        v = self.wv(x)
+        
+        # Calculate attention
+        output, _ = self.scaled_dot_product_attention(q, k, v, mask)
+        
         return output
 
 class MultiHeadAttention(nn.Module):
@@ -81,8 +99,19 @@ class MultiHeadAttention(nn.Module):
         super(MultiHeadAttention, self).__init__()
         
         # TODO: Define the heads and linear layer
-        self.heads = None
-        self.output_linear = None
+        self.num_attention_heads = num_attention_heads
+        self.d_k = d_model // num_attention_heads  # Key dimension per head
+        self.d_v = d_model // num_attention_heads  # Value dimension per head
+        self.d_q = d_model // num_attention_heads  # Query dimension per head
+        
+        # Create multiple attention heads
+        self.heads = nn.ModuleList([
+            AttentionHead(d_model, self.d_k, self.d_q, self.d_v)
+            for _ in range(num_attention_heads)
+        ])
+        
+        # Output projection
+        self.output_linear = nn.Linear(num_attention_heads * self.d_v, d_model)
 
 
     def forward(self, hidden_state, mask=None):
@@ -96,8 +125,15 @@ class MultiHeadAttention(nn.Module):
             Tensor: Output tensor of shape (batch_size, seq_len, d_model).
         """
         # TODO: Implement the forward pass for the multi-head attention layer, now with masking.
-        x = None
-        return x
+        head_outputs = [head(hidden_state, mask) for head in self.heads]
+        
+        # Concatenate outputs from all heads
+        multi_head_output = torch.cat(head_outputs, dim=-1)
+        
+        # Project back to d_model dimension
+        output = self.output_linear(multi_head_output)
+        
+        return output
 
 class FeedForward(nn.Module):
     """FeedForward module for the Transformer.
@@ -118,9 +154,9 @@ class FeedForward(nn.Module):
     def __init__(self, d_model: int, intermediate_size: int):
         super(FeedForward, self).__init__()
         # TODO: Define the different layers 
-        self.linear_1 = None
-        self.linear_2 = None
-        self.gelu = None
+        self.linear_1 = nn.Linear(d_model, intermediate_size)
+        self.linear_2 = nn.Linear(intermediate_size, d_model)
+        self.gelu = nn.GELU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the feed-forward network.
@@ -132,7 +168,9 @@ class FeedForward(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, seq_len, d_model).
         """
         # TODO: Implement the forward pass for the feed-forward network
-        x = None
+        x = self.linear_1(x)
+        x = self.gelu(x)
+        x = self.linear_2(x)
         return x
 
 class TransformerDecoderLayer(nn.Module):
@@ -158,10 +196,10 @@ class TransformerDecoderLayer(nn.Module):
         super(TransformerDecoderLayer, self).__init__()
 
         # TODO: Initialize the sub-layers
-        self.layer_norm_1 = None
-        self.layer_norm_2 = None
-        self.self_attention = None
-        self.feed_forward = None
+        self.layer_norm_1 = nn.LayerNorm(d_model)
+        self.layer_norm_2 = nn.LayerNorm(d_model)
+        self.self_attention = MultiHeadAttention(d_model, num_attention_heads)
+        self.feed_forward = FeedForward(d_model, intermediate_size)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Forward pass through the Transformer decoder layer.
@@ -174,6 +212,15 @@ class TransformerDecoderLayer(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, seq_len, d_model).
         """
         # TODO: Implement the forward pass for the Transformer decoder layer
+
+        norm_x = self.layer_norm_1(x)
+        attention_output = self.self_attention(norm_x, mask)
+        x = x + attention_output  # Residual connection
+
+        # Feed-forward block with residual connection and layer norm
+        norm_x = self.layer_norm_2(x)
+        ff_output = self.feed_forward(norm_x)
+        x = x + ff_output  # Residual connection
 
         return x
 
@@ -197,9 +244,10 @@ class Embeddings(nn.Module):
     def __init__(self, vocab_size: int, max_position_embeddings: int, d_model: int):
         super(Embeddings, self).__init__()
         # TODO: Define the different layers of the embeddings
-        self.token_embeddings = None
-        self.position_embeddings = None
-        self.layer_norm = None
+        self.token_embeddings = nn.Embedding(vocab_size, d_model)
+        self.position_embeddings = nn.Embedding(max_position_embeddings, d_model)
+        self.layer_norm = nn.LayerNorm(d_model)
+
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Forward pass to combine token and positional embeddings.
@@ -211,9 +259,18 @@ class Embeddings(nn.Module):
             torch.Tensor: The combined and normalized embeddings of shape (batch_size, seq_len, d_model).
         """
         # TODO: Implement the forward pass for the embeddings
-        embeddings = None
+        seq_length = input_ids.size(1)
+        
+        position_ids = torch.arange(seq_length, device=input_ids.device).unsqueeze(0)
+        
+        token_embeds = self.token_embeddings(input_ids)
+        position_embeds = self.position_embeddings(position_ids)
+        
+        embeddings = token_embeds + position_embeds
+        
+        embeddings = self.layer_norm(embeddings)
+        
         return embeddings
-
 class TransformerDecoder(nn.Module):
     """Transformer Decoder.
 
@@ -237,8 +294,11 @@ class TransformerDecoder(nn.Module):
                  num_attention_heads: int, intermediate_size: int, num_hidden_layers: int):
         super(TransformerDecoder, self).__init__()
         # TODO: Define the embeddings layer and the decoder layers
-        self.embeddings = None
-        self.layers = None
+        self.embeddings = Embeddings(vocab_size, max_position_embeddings, d_model)
+        self.layers = nn.ModuleList([
+            TransformerDecoderLayer(d_model, num_attention_heads, intermediate_size)
+            for _ in range(num_hidden_layers)
+        ])
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Forward pass through the Transformer decoder.
@@ -250,7 +310,18 @@ class TransformerDecoder(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, seq_len, d_model).
         """
         # TODO: Implement the forward pass for the Transformer decoder
-        x = None
+        seq_length = input_ids.size(1)
+        causal_mask = torch.triu(torch.ones(seq_length, seq_length), diagonal=1).bool()
+        causal_mask = causal_mask.unsqueeze(0)  # Add batch dimension
+        attention_mask = (~causal_mask).float()
+        
+        # Get embeddings
+        x = self.embeddings(input_ids)
+        
+        # Pass through each decoder layer
+        for layer in self.layers:
+            x = layer(x, attention_mask)
+            
         return x
 
 class TransformerForLanguageModeling(nn.Module):
@@ -273,8 +344,16 @@ class TransformerForLanguageModeling(nn.Module):
                  num_attention_heads: int, intermediate_size: int, num_hidden_layers: int):
         super(TransformerForLanguageModeling, self).__init__()
         # TODO: Define the Transformer decoder and the language modeling head
-        self.transformer_decoder = None
-        self.lm_head = None
+        self.transformer_decoder = TransformerDecoder(
+            vocab_size=vocab_size,
+            max_position_embeddings=max_position_embeddings,
+            d_model=d_model,
+            num_attention_heads=num_attention_heads,
+            intermediate_size=intermediate_size,
+            num_hidden_layers=num_hidden_layers
+        )
+        
+        self.lm_head = nn.Linear(d_model, vocab_size)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Forward pass through the Transformer model with language modeling head.
@@ -287,5 +366,8 @@ class TransformerForLanguageModeling(nn.Module):
         """
 
         # TODO: Implement the forward pass for the Transformer model
-        logits = None
+        hidden_states = self.transformer_decoder(input_ids)
+        
+        logits = self.lm_head(hidden_states)
+        
         return logits
